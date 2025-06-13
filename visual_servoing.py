@@ -105,9 +105,9 @@ class BlackObjectIsolator:
 
         return mask
 
-    def get_single_contour(self, frame, drawing_frame=None):
+    def get_single_contour(self, frame=None, mask=None, drawing_frame=None):
         # Get the mask for the black object in the color frame
-        mask = self.reduce_noise(frame)
+        mask = mask if mask is not None else self.reduce_noise(frame)
 
         # Define sorting function for contours
         def sort_contours(cnts):
@@ -124,19 +124,50 @@ class BlackObjectIsolator:
             single_contour_mask = np.zeros_like(mask)
             cv2.drawContours(single_contour_mask, [largest_contour], -1, 255, thickness=cv2.FILLED)
             if drawing_frame is not None:
-                drawing_frame[:] = cv2.cvtColor(single_contour_mask, cv2.COLOR_GRAY2BGR)
+                bgr_mask = cv2.cvtColor(single_contour_mask, cv2.COLOR_GRAY2BGR)
+                if bgr_mask.shape[:2] != drawing_frame.shape[:2]:
+                    bgr_mask = cv2.resize(bgr_mask, (drawing_frame.shape[1], drawing_frame.shape[0]), interpolation=cv2.INTER_NEAREST)
+                drawing_frame[:] = bgr_mask
             return single_contour_mask
         else:
             if drawing_frame is not None:
-                drawing_frame[:] = np.zeros_like(frame)
+                blank = np.zeros_like(mask)
+                bgr_blank = cv2.cvtColor(blank, cv2.COLOR_GRAY2BGR)
+                if bgr_blank.shape[:2] != drawing_frame.shape[:2]:
+                    bgr_blank = cv2.resize(bgr_blank, (drawing_frame.shape[1], drawing_frame.shape[0]), interpolation=cv2.INTER_NEAREST)
+                drawing_frame[:] = bgr_blank
             return np.zeros_like(mask)
 
     def refine_with_depth(self, color_frame, depth_frame, drawing_frame):
-        mask = self.get_single_contour(color_frame, drawing_frame=drawing_frame)
+        mask = self.reduce_noise(color_frame, drawing_frame=None)  # Don't draw yet
 
-        # Stub for depth refinement
-        # Here you would typically use the depth_frame to discard pixels not in self.depth_range (but keeping pixels that are exactly 0 since they are probably in the dead zone of the depth camera)
-        return mask
+        # Resize mask to match depth_frame if needed
+        color_h, color_w = color_frame.shape[:2]
+        depth_h, depth_w = depth_frame.shape[:2]
+        if (color_h, color_w) != (depth_h, depth_w):
+            mask_resized = cv2.resize(mask, (depth_w, depth_h), interpolation=cv2.INTER_NEAREST)
+        else:
+            mask_resized = mask
+
+        # Only keep mask pixels where depth is in range or depth==0
+        min_depth, max_depth = self.depth_range
+        valid = ((depth_frame >= min_depth) & (depth_frame <= max_depth)) | (depth_frame == 0)
+        filtered_mask = np.where((mask_resized > 0) & valid, 255, 0).astype(np.uint8)
+
+        # Now resize filtered_mask back to color frame size for downstream processing
+        if (color_h, color_w) != (depth_h, depth_w):
+            filtered_mask_color = cv2.resize(filtered_mask, (color_w, color_h), interpolation=cv2.INTER_NEAREST)
+        else:
+            filtered_mask_color = filtered_mask
+
+        # Optionally draw
+        if drawing_frame is not None:
+            bgr_mask = cv2.cvtColor(filtered_mask_color, cv2.COLOR_GRAY2BGR)
+            if bgr_mask.shape[:2] != drawing_frame.shape[:2]:
+                bgr_mask = cv2.resize(bgr_mask, (drawing_frame.shape[1], drawing_frame.shape[0]), interpolation=cv2.INTER_NEAREST)
+            drawing_frame[:] = bgr_mask
+
+        return filtered_mask_color
 
 class ObjectLocator:
     """ Gets pose and other pose information about the object. """
@@ -156,12 +187,22 @@ class ObjectLocator:
         self.obj_isolator = obj_isolator or BlackObjectIsolator()
         self.major_axis_ratio = 2.2
     
+    def get_object_mask(self, color_frame, depth_frame=None, drawing_frame=None):
+        """ Returns a mask for the black object in the color frame. If depth_frame is provided, it refines the mask with depth information. """
+        # Optionally refine with depth information
+        if depth_frame is not None:
+            mask = self.obj_isolator.refine_with_depth(color_frame, depth_frame, drawing_frame=drawing_frame)
+        else:
+            mask = self.obj_isolator.get_single_contour(color_frame, drawing_frame=drawing_frame)
+
+        return mask
+
     def get_position(self, color_frame = None, mask = None, depth_frame=None, drawing_frame=None):
         """ Uses the mask from the ObjectIsolator to get x, y position of the object in the color frame;
         if depth_frame is provided, it also gets the z position of the object in the depth frame. """
 
         # Get the mask for the black object in the color frame. We can safely assume this is a single contour.
-        mask =  mask if mask is not None else self.obj_isolator.get_single_contour(color_frame)
+        mask =  mask if mask is not None else self.get_object_mask(color_frame=color_frame, depth_frame=depth_frame, drawing_frame=drawing_frame)
         moments = cv2.moments(mask, binaryImage=True)
         if moments['m00'] == 0:
             if drawing_frame is not None:
@@ -210,7 +251,7 @@ class ObjectLocator:
         roll = None
 
         # We can safely assume that the mask is a single contour.
-        mask =  mask if mask is not None else self.obj_isolator.get_single_contour(color_frame)
+        mask =  mask if mask is not None else self.get_object_mask(color_frame=color_frame, depth_frame=depth_frame)
 
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
@@ -218,7 +259,7 @@ class ObjectLocator:
         contour = contours[0]
 
         # Get contour line info
-        line = get_contour_line_info(contour, fix_vert=False)
+        line = get_contour_major_axis(contour)
         pt1, pt2, center, angle, length = line
         roll = angle  # Assuming roll is the angle of the contour line
         if drawing_frame is not None:
@@ -228,18 +269,53 @@ class ObjectLocator:
             cv2.circle(drawing_frame, center, 5, (0, 0, 255), -1)
 
             # Write the angle in the top left corner
-            cv2.putText(drawing_frame, f"roll: {math.degrees(roll):.2f}", (self.X_POS, self.Y_START + 3 * self.Y_STEP), self.FONT, self.FONT_SCALE, self.FONT_COLOR, self.FONT_THICKNESS)
+            if roll is not None:
+                cv2.putText(drawing_frame, f"roll: {math.degrees(roll):.2f}", (self.X_POS, self.Y_START + 3 * self.Y_STEP), self.FONT, self.FONT_SCALE, self.FONT_COLOR, self.FONT_THICKNESS)
         
         return roll, line
 
     def get_orientation(self, color_frame=None, mask=None, depth_frame=None, drawing_frame=None):
-        mask = mask if mask is not None else self.obj_isolator.get_single_contour(color_frame)
+        mask = mask if mask is not None else self.get_object_mask(color_frame=color_frame, depth_frame=depth_frame, drawing_frame=drawing_frame)
         # Get the roll of the object
         roll, line = self.get_roll(color_frame=color_frame, mask=mask, depth_frame=depth_frame, drawing_frame=drawing_frame)
         if roll is None:
-            return None
+            return None, None, None
 
-        pass
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None, None, None
+        
+        contour = contours[0]
+        major_ax = get_contour_major_axis(contour)
+        minor_ax = get_contour_minor_axis(contour)
+        L_major = major_ax[-1]
+        L_minor = minor_ax[-1]
+        R0 = self.major_axis_ratio
+        # Avoid division by zero
+        if L_minor == 0 or L_major == 0:
+            pitch = None
+            yaw = None
+        else:
+            # Clamp arguments to [-1, 1] for safety
+            arg_pitch = L_minor / (L_major / R0)
+            arg_yaw = L_major / (L_minor * R0)
+            arg_pitch = max(-1.0, min(1.0, arg_pitch))
+            arg_yaw = max(-1.0, min(1.0, arg_yaw))
+            pitch = math.acos(arg_pitch)
+            yaw = math.acos(arg_yaw)
+        if drawing_frame is not None:
+            draw_line(drawing_frame, major_ax)
+            draw_line(drawing_frame, minor_ax)
+            y_offset = self.Y_START + 3 * self.Y_STEP
+            if roll is not None:
+                cv2.putText(drawing_frame, f"roll: {math.degrees(roll):.2f}", (self.X_POS, y_offset), self.FONT, self.FONT_SCALE, self.FONT_COLOR, self.FONT_THICKNESS)
+                y_offset += self.Y_STEP
+            if pitch is not None:
+                cv2.putText(drawing_frame, f"pitch: {math.degrees(pitch):.2f}", (self.X_POS, y_offset), self.FONT, self.FONT_SCALE, self.FONT_COLOR, self.FONT_THICKNESS)
+                y_offset += self.Y_STEP
+            if yaw is not None:
+                cv2.putText(drawing_frame, f"yaw: {math.degrees(yaw):.2f}", (self.X_POS, y_offset), self.FONT, self.FONT_SCALE, self.FONT_COLOR, self.FONT_THICKNESS)
+        return roll, pitch, yaw
 
     def get_pose(self, color_frame, depth_frame=None, drawing_frame=None):
         mask = self.obj_isolator.get_single_contour(color_frame)
@@ -403,7 +479,7 @@ class ArmController:
     def __init__(self,
             obj_loc=None,
             aruco_loc=None,
-            target_offset=(0.0, -0.25, 0.0),
+            target_offset=(0.0, -0.3, 0.0),
             target_local=True
         ):
         """
@@ -416,10 +492,10 @@ class ArmController:
         self.aruco_loc = aruco_loc or ArucoLocator()
         self.target_offset = target_offset
         self.target_local = target_local
-        self.x_pid = PID(1.0, 0.1, 0.05, setpoint=0)
-        self.y_pid = PID(1.0, 0.1, 0.05, setpoint=0)
-        self.z_pid = PID(1.0, 0.1, 0.05, setpoint=0)
-        self.roll_pid = PID(1.0, 0.1, 0.05, setpoint=0)
+        self.x_pid = PID(10.0, 0.1, 0.05, setpoint=0, output_limits=(-1, 1))
+        self.y_pid = PID(10.0, 0.1, 0.05, setpoint=0, output_limits=(-1, 1))
+        self.z_pid = PID(10.0, 0.1, 0.05, setpoint=0, output_limits=(-1, 1))
+        self.roll_pid = PID(10.0, 0.1, 0.05, setpoint=0, output_limits=(-1, 1))
 
     def get_target(self, color_frame, depth_frame=None, drawing_frame=None):
         object_pose = self.obj_loc.get_pose(color_frame, depth_frame=depth_frame, drawing_frame=drawing_frame)
@@ -541,7 +617,6 @@ class ArmController:
 
         return control_x, control_y, control_z, control_roll
         
-
 def adaptive_thres(frame, drawing_frame=None,
     blur_kernel_size=(7, 7),  # Kernel size for GaussianBlur
     adaptive_method=cv2.ADAPTIVE_THRESH_GAUSSIAN_C,  # Adaptive thresholding method
@@ -557,7 +632,7 @@ def adaptive_thres(frame, drawing_frame=None,
         drawing_frame[:] = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
     return mask
 
-def get_contour_line_info(c, fix_vert=True):
+def get_contour_major_axis(c):
     # Fit a line to the contour
     vx, vy, cx, cy = cv2.fitLine(c, cv2.DIST_L2, 0, 0.01, 0.01).flatten()
     
@@ -572,8 +647,6 @@ def get_contour_line_info(c, fix_vert=True):
     
     # Calculate the line angle in radians.
     angle = math.atan2(vy, vx)
-    if fix_vert:
-        angle = angle - (math.pi / 2) * np.sign(angle)
     
     # Calculate the line length given pt1 and pt2.
     length = math.hypot(pt2[0] - pt1[0], pt2[1] - pt1[1])
@@ -593,3 +666,34 @@ def draw_line(drawing_frame, line):
     cv2.line(drawing_frame, pt1, pt2, (0, 255, 0), 2)
     # Draw the center point
     cv2.circle(drawing_frame, center, 5, (0, 0, 255), -1)
+
+def get_contour_minor_axis(c):
+    # Fit a line to the contour (major axis)
+    vx, vy, cx, cy = cv2.fitLine(c, cv2.DIST_L2, 0, 0.01, 0.01).flatten()
+
+    # The minor axis is perpendicular to the major axis
+    # So, rotate (vx, vy) by 90 degrees
+    perp_vx = -vy
+    perp_vy = vx
+
+    # Project contour points onto the perpendicular direction
+    projections = [((int(pt[0][0]) - int(cx)) * perp_vx + (int(pt[0][1]) - int(cy)) * perp_vy) for pt in c]
+    min_proj = min(projections)
+    max_proj = max(projections)
+
+    # Compute endpoints from the extreme projection values
+    pt1 = (int(round(cx + perp_vx * min_proj)), int(round(cy + perp_vy * min_proj)))
+    pt2 = (int(round(cx + perp_vx * max_proj)), int(round(cy + perp_vy * max_proj)))
+
+    # Calculate the line angle in radians
+    angle = math.atan2(perp_vy, perp_vx)
+
+    # Calculate the line length given pt1 and pt2
+    length = math.hypot(pt2[0] - pt1[0], pt2[1] - pt1[1])
+
+    # Ensure cx, cy are ints as well
+    cx_int = int(round(cx))
+    cy_int = int(round(cy))
+    center = (cx_int, cy_int)
+
+    return pt1, pt2, center, angle, length

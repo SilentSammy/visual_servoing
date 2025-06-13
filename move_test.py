@@ -6,7 +6,7 @@ LIN_VEL = 300  # translation speed
 ROT_VEL = 15   # rotation speed (much slower)
 
 if __name__ == '__main__':
-    arm = XarmController('192.168.1.207')
+    arm = XarmController('192.168.1.200')
     try:
         while arm.alive:
             dx = -1 if is_pressed('d') else 1 if is_pressed('a') else 0

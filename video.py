@@ -111,6 +111,40 @@ class VideoPlayer:
             
             self._get_frame = get_frame
 
+class VideoRecorder:
+    def __init__(self, dir_path="./resources/videos", fps=30):
+        self.dir_path = dir_path
+        self.fps = fps
+        self.vw = None
+        self.filename = None
+
+    def start(self, frame):
+        if self.vw is not None:
+            self.stop()
+        os.makedirs(self.dir_path, exist_ok=True)
+        height, width = frame.shape[:2]
+        self.filename = os.path.join(self.dir_path, time.strftime("output_%Y-%m-%d_%H-%M-%S.mp4"))
+        fourcc = cv2.VideoWriter.fourcc(*'avc1')  # Use 'mp4v' for better compatibility
+        self.vw = cv2.VideoWriter(self.filename, fourcc, self.fps, (width, height))
+        if not self.vw.isOpened():
+            print(f"Failed to open video writer for {self.filename}")
+        else:
+            print(f"Video recording started: {self.filename}")
+
+    def write(self, frame):
+        if self.vw is not None and frame is not None:
+            self.vw.write(frame)
+
+    def stop(self):
+        if self.vw is not None:
+            self.vw.release()
+            print(f"Video recording closed: {self.filename}")
+            self.vw = None
+            self.filename = None
+
+    def is_recording(self):
+        return self.vw is not None
+
 def show_frame(img, name, scale=1):
         cv2.namedWindow(name, cv2.WINDOW_NORMAL)
         cv2.setWindowProperty(name, cv2.WND_PROP_TOPMOST, 1)
@@ -123,12 +157,14 @@ if __name__ == "__main__":
     import keybrd as kb
     import visual_servoing as v
 
+    vr = VideoRecorder(dir_path="./recording/videos", fps=30)
+
     # ---- CONFIGURATION ----
     # Set these to any valid source: int (webcam), str (folder or file), or None for depth
-    COLOR_SOURCE = r"recording\color_pngs"  # or "video.mp4", or None for webcam
-    DEPTH_SOURCE = r"recording\depth_pngs"
     COLOR_SOURCE = 0
     DEPTH_SOURCE = None
+    COLOR_SOURCE = r"recording\color_pngs"  # or "video.mp4", or None for webcam
+    DEPTH_SOURCE = r"recording\depth_pngs"
 
     color_vp = VideoPlayer(COLOR_SOURCE)
     depth_vp = VideoPlayer(DEPTH_SOURCE) if DEPTH_SOURCE else None
@@ -145,6 +181,7 @@ if __name__ == "__main__":
     ol_pipeline = [
         ("position", lambda: ol.get_position(color_frame, depth_frame=depth_frame, drawing_frame=drawing_frame)),
         ("roll", lambda: ol.get_roll(color_frame, depth_frame=depth_frame, drawing_frame=drawing_frame)),
+        ("orientation", lambda: ol.get_orientation(color_frame, depth_frame=depth_frame, drawing_frame=drawing_frame)),
         ("pose", lambda: ol.get_pose(color_frame, depth_frame=depth_frame, drawing_frame=drawing_frame)),
     ]
     aruco_pipeline = [
@@ -186,4 +223,4 @@ if __name__ == "__main__":
         print(f"{pipeline[layer][0]}")
         pipeline[layer][1]()
 
-        color_vp.show_frame(drawing_frame, "Drawing Frame", scale=0.5)
+        color_vp.show_frame(drawing_frame, "Drawing Frame", scale=0.75)
