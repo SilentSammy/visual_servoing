@@ -1,6 +1,7 @@
 import math
 import cv2
 import numpy as np
+from simple_pid import PID
 
 class BlackObjectIsolator:
     """ Basically creates a mask for the black object in the color frame. """
@@ -15,11 +16,12 @@ class BlackObjectIsolator:
         block_size=141,                         # Size of the neighborhood used for thresholding (must be odd)
         c_value=6,                              # Constant subtracted from the mean or weighted mean (the higher the value, the darker the pixels need to be to be considered black)
         
-        morph_kernel_size=(5, 5),  # Kernel size for morphological operations
-        erosion_iterations=1,  # Number of iterations for erosion
-        dilation_iterations=1,  # Number of iterations for dilation
-        min_area=1000,  # Minimum area of contours to consider
+        morph_kernel_size=(5, 5),   # Kernel size for morphological operations
+        erosion_iterations=1,       # Number of iterations for erosion
+        dilation_iterations=1,      # Number of iterations for dilation
+        min_area=1000,              # Minimum area of contours to consider
 
+        depth_range = (300, 1000),  # Range of depth values to consider as valid (in mm, for example)
     ):
         # HSV thresholding parameters
         self.hue_range = hue_range
@@ -38,6 +40,9 @@ class BlackObjectIsolator:
         self.erosion_iterations = erosion_iterations
         self.dilation_iterations = dilation_iterations
         self.min_area = min_area
+
+        # Depth filtering parameters
+        self.depth_range = depth_range  # Range of depth values to consider as valid (in mm, for example)
 
     def adaptive_thres(self, frame, drawing_frame=None):
         mask = adaptive_thres(frame, drawing_frame=drawing_frame,
@@ -126,9 +131,11 @@ class BlackObjectIsolator:
                 drawing_frame[:] = np.zeros_like(frame)
             return np.zeros_like(mask)
 
-    def get_mask(self, frame, drawing_frame=None):
-        """ Get the mask for the black object in the color frame. """
-        mask = self.get_single_contour(frame, drawing_frame=drawing_frame)
+    def refine_with_depth(self, color_frame, depth_frame, drawing_frame):
+        mask = self.get_single_contour(color_frame, drawing_frame=drawing_frame)
+
+        # Stub for depth refinement
+        # Here you would typically use the depth_frame to discard pixels not in self.depth_range (but keeping pixels that are exactly 0 since they are probably in the dead zone of the depth camera)
         return mask
 
 class ObjectLocator:
@@ -154,7 +161,7 @@ class ObjectLocator:
         if depth_frame is provided, it also gets the z position of the object in the depth frame. """
 
         # Get the mask for the black object in the color frame. We can safely assume this is a single contour.
-        mask =  mask if mask is not None else self.obj_isolator.get_mask(color_frame)
+        mask =  mask if mask is not None else self.obj_isolator.get_single_contour(color_frame)
         moments = cv2.moments(mask, binaryImage=True)
         if moments['m00'] == 0:
             if drawing_frame is not None:
@@ -203,7 +210,7 @@ class ObjectLocator:
         roll = None
 
         # We can safely assume that the mask is a single contour.
-        mask =  mask if mask is not None else self.obj_isolator.get_mask(color_frame)
+        mask =  mask if mask is not None else self.obj_isolator.get_single_contour(color_frame)
 
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
@@ -226,7 +233,7 @@ class ObjectLocator:
         return roll, line
 
     def get_orientation(self, color_frame=None, mask=None, depth_frame=None, drawing_frame=None):
-        mask = mask if mask is not None else self.obj_isolator.get_mask(color_frame)
+        mask = mask if mask is not None else self.obj_isolator.get_single_contour(color_frame)
         # Get the roll of the object
         roll, line = self.get_roll(color_frame=color_frame, mask=mask, depth_frame=depth_frame, drawing_frame=drawing_frame)
         if roll is None:
@@ -235,11 +242,15 @@ class ObjectLocator:
         pass
 
     def get_pose(self, color_frame, depth_frame=None, drawing_frame=None):
-        mask = self.obj_isolator.get_mask(color_frame)
+        mask = self.obj_isolator.get_single_contour(color_frame)
         
         # Get the pose info of the object
-        cx_norm, cy_norm, z = self.get_position(color_frame, mask=mask, depth_frame=depth_frame)
+        pos = self.get_position(color_frame, mask=mask, depth_frame=depth_frame)
+        if pos is None:
+            return None
+        cx_norm, cy_norm, z = pos
         roll, line = self.get_roll(color_frame, mask=mask, depth_frame=depth_frame, drawing_frame=drawing_frame)
+        # ...rest of your code...
 
         if cx_norm is None or cy_norm is None:
             return None
@@ -358,9 +369,9 @@ class ArucoLocator:
         angle = math.atan2(p1[1] - p0[1], p1[0] - p0[0])
 
         # drawing
+        pt1 = (int(round(p0[0])), int(round(p0[1])))
+        pt2 = (int(round(p1[0])), int(round(p1[1])))
         if drawing_frame is not None:
-            pt1 = (int(round(p0[0])), int(round(p0[1])))
-            pt2 = (int(round(p1[0])), int(round(p1[1])))
             cv2.line(drawing_frame, pt1, pt2, (0, 255, 0), 2)
             cv2.putText(drawing_frame,
                         f"roll: {math.degrees(angle):.1f}°",
@@ -392,7 +403,7 @@ class ArmController:
     def __init__(self,
             obj_loc=None,
             aruco_loc=None,
-            target_offset=(0.0, -0.15, 0.0),
+            target_offset=(0.0, -0.25, 0.0),
             target_local=True
         ):
         """
@@ -405,6 +416,10 @@ class ArmController:
         self.aruco_loc = aruco_loc or ArucoLocator()
         self.target_offset = target_offset
         self.target_local = target_local
+        self.x_pid = PID(1.0, 0.1, 0.05, setpoint=0)
+        self.y_pid = PID(1.0, 0.1, 0.05, setpoint=0)
+        self.z_pid = PID(1.0, 0.1, 0.05, setpoint=0)
+        self.roll_pid = PID(1.0, 0.1, 0.05, setpoint=0)
 
     def get_target(self, color_frame, depth_frame=None, drawing_frame=None):
         object_pose = self.obj_loc.get_pose(color_frame, depth_frame=depth_frame, drawing_frame=drawing_frame)
@@ -452,6 +467,80 @@ class ArmController:
                         (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             
         return target_x, target_y, target_z, roll if self.target_local else 0
+
+    def compute_error(self, color_frame, depth_frame=None, drawing_frame=None):
+        target_pose = self.get_target(color_frame, depth_frame=depth_frame)
+        current_pose = self.aruco_loc.get_pose(color_frame, depth_frame=depth_frame)
+
+        if drawing_frame is not None:
+            # Draw the target position
+            if target_pose is not None:
+                cx, cy, cz, roll = target_pose
+                if cx is not None and cy is not None:
+                    h, w = color_frame.shape[:2]
+                    center = (int(round(cx * w)), int(round(cy * h)))
+                    cv2.drawMarker(drawing_frame, center, (255, 0, 0), markerType=cv2.MARKER_CROSS, markerSize=20, thickness=2)
+                cz_str = f"{cz:.2f}" if cz is not None else "None"
+                cv2.putText(drawing_frame, f"Target: ({cx if cx is not None else 'None'},"
+                                        f" {cy if cy is not None else 'None'}, {cz_str})",
+                            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+
+            if current_pose is not None:
+                cx, cy, cz, roll = current_pose
+                if cx is not None and cy is not None:
+                    h, w = color_frame.shape[:2]
+                    center = (int(round(cx * w)), int(round(cy * h)))
+                    cv2.drawMarker(drawing_frame, center, (0, 255, 0), markerType=cv2.MARKER_CROSS, markerSize=20, thickness=2)
+                cz_str = f"{cz:.2f}" if cz is not None else "None"
+                cv2.putText(drawing_frame, f"Current: ({cx if cx is not None else 'None'}," 
+                                        f" {cy if cy is not None else 'None'}, {cz_str})",
+                            (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+        if target_pose is None or current_pose is None:
+            return None
+        
+        target_x, target_y, target_z, target_roll = target_pose
+        current_x, current_y, current_z, current_roll = current_pose
+        # Compute the error as the difference between target and current positions
+        error_x = target_x - current_x if target_x is not None and current_x is not None else None
+        error_y = target_y - current_y if target_y is not None and current_y is not None else None
+        error_z = target_z - current_z if target_z is not None and current_z is not None else None
+        error_roll = target_roll - current_roll if target_roll is not None and current_roll is not None else None
+
+        if drawing_frame is not None:
+            # Draw line between target and current positions
+            if target_x is not None and target_y is not None and current_x is not None and current_y is not None:
+                h, w = color_frame.shape[:2]
+                target_center = (int(round(target_x * w)), int(round(target_y * h)))
+                current_center = (int(round(current_x * w)), int(round(current_y * h)))
+                cv2.line(drawing_frame, target_center, current_center, (255, 255, 0), 2)
+                error_x_str = f"{error_x:.2f}" if error_x is not None else "None"
+                error_y_str = f"{error_y:.2f}" if error_y is not None else "None"
+                error_z_str = f"{error_z:.2f}" if error_z is not None else "None"
+                error_roll_str = f"{error_roll:.2f}" if error_roll is not None else "None"
+                cv2.putText(
+                    drawing_frame,
+                    f"Error: ({error_x_str}, {error_y_str}, {error_z_str}, {error_roll_str})",
+                    (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2
+                )
+
+        return error_x, error_y, error_z, error_roll
+    
+    def cartesian_vels(self, color_frame, depth_frame=None, drawing_frame=None):
+        errors = self.compute_error(color_frame, depth_frame=depth_frame, drawing_frame=drawing_frame)
+        if errors is None:
+            return 0, 0, 0, 0
+        error_x, error_y, error_z, error_roll = errors
+        error_z = error_z or 0
+
+        # Compute the control signals using PID controllers
+        control_x = self.x_pid(error_x) if error_x is not None else 0
+        control_y = self.y_pid(error_y) if error_y is not None else 0
+        control_z = self.z_pid(error_z) if error_z is not None else 0
+        control_roll = self.roll_pid(error_roll) if error_roll is not None else 0
+
+        return control_x, control_y, control_z, control_roll
+        
 
 def adaptive_thres(frame, drawing_frame=None,
     blur_kernel_size=(7, 7),  # Kernel size for GaussianBlur

@@ -111,6 +111,14 @@ class VideoPlayer:
             
             self._get_frame = get_frame
 
+def show_frame(img, name, scale=1):
+        cv2.namedWindow(name, cv2.WINDOW_NORMAL)
+        cv2.setWindowProperty(name, cv2.WND_PROP_TOPMOST, 1)
+        cv2.resizeWindow(name, int(img.shape[1]*scale), int(img.shape[0]*scale))
+        cv2.imshow(name, img)
+        if cv2.waitKey(1) & 0xFF == 27:
+            raise KeyboardInterrupt
+
 if __name__ == "__main__":
     import keybrd as kb
     import visual_servoing as v
@@ -127,22 +135,26 @@ if __name__ == "__main__":
 
     oi = v.BlackObjectIsolator()
     ol = v.ObjectLocator(obj_isolator=oi)
+    al = v.ArucoLocator()
     controller = v.ArmController(obj_loc=ol)
+    raw = [ ("raw_frame", lambda: None), ]
     oi_pipeline = [
-        ("raw_frame", lambda: None),
-        ("value_thres", lambda: oi.hsv_thres(color_frame, drawing_frame=drawing_frame)),
-        ("remove_at_edges", lambda: oi.remove_at_edges(color_frame, drawing_frame=drawing_frame)),
-        ("get_mask", lambda: oi.get_mask(color_frame, drawing_frame=drawing_frame)),
+        ("get_mask", lambda: oi.get_single_contour(color_frame, drawing_frame=drawing_frame)),
+        ("refine_w_depth", lambda: oi.refine_with_depth(color_frame, depth_frame=depth_frame, drawing_frame=drawing_frame)),
     ]
     ol_pipeline = [
         ("position", lambda: ol.get_position(color_frame, depth_frame=depth_frame, drawing_frame=drawing_frame)),
         ("roll", lambda: ol.get_roll(color_frame, depth_frame=depth_frame, drawing_frame=drawing_frame)),
         ("pose", lambda: ol.get_pose(color_frame, depth_frame=depth_frame, drawing_frame=drawing_frame)),
     ]
+    aruco_pipeline = [
+        ("aruco", lambda: al.get_pose(color_frame, depth_frame=depth_frame, drawing_frame=drawing_frame)),
+    ]
     controller_pipeline = [
         ("get_target", lambda: controller.get_target(color_frame, depth_frame=depth_frame, drawing_frame=drawing_frame)),
+        ("compute_error", lambda: controller.compute_error(color_frame, depth_frame=depth_frame, drawing_frame=drawing_frame)),
     ]
-    pipeline = oi_pipeline + ol_pipeline + controller_pipeline
+    pipeline = raw + oi_pipeline + ol_pipeline + aruco_pipeline + controller_pipeline
 
     re = kb.rising_edge
     pr = kb.is_pressed

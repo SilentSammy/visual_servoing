@@ -25,7 +25,7 @@ import datetime
 import random
 import traceback
 import threading
-from xarm import version
+from xarm_control import version
 from xarm.wrapper import XArmAPI
 from keybrd import is_pressed
 
@@ -140,7 +140,6 @@ class RobotMain(object):
             self.alive = False
             self._arm.release_error_warn_changed_callback(self._error_warn_changed_callback)
             self._arm.release_state_changed_callback(self._state_changed_callback)
-
 
 if __name__ == '__main__':
     RobotMain.pprint('xArm-Python-SDK Version:{}'.format(version.__version__))
