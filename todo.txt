@@ -1,0 +1,4 @@
++ combine get_position and get_roll into get_pose
+- make ArucoLocator
+- we can potentially get pitch and yaw by comparing the proportions between major and minor axes
+- to resolve sign ambiguity, use depth sensor
