@@ -111,67 +111,23 @@ class VideoPlayer:
             
             self._get_frame = get_frame
 
-class MultiVideoPlayer:
-    def __init__(self, frame_sources):
-        if not isinstance(frame_sources, (list, tuple)):
-            raise ValueError("frame_sources must be a list or tuple of sources")
-        self.frame_sources = frame_sources
-        self.players = [VideoPlayer(src) for src in frame_sources]
-        self.frame_count = min(p.frame_count for p in self.players)
-        self._frame_idx = 0.0
-        self.fps = min(p.fps for p in self.players)
-        self.last_time = None
-        self.dt = 0.0
-        self.first_time = True
-        self.scale = 1.0
-
-    def show_frame(self, img, name, scale=None):
-        scale = scale or self.scale
-        cv2.namedWindow(name, cv2.WINDOW_NORMAL)
-        cv2.setWindowProperty(name, cv2.WND_PROP_TOPMOST, 1)
-        if self.first_time:
-            self.first_time = False
-            cv2.resizeWindow(name, int(img.shape[1]*scale), int(img.shape[0]*scale))
-        cv2.imshow(name, img)
-        if cv2.waitKey(1) & 0xFF == 27:
-            raise KeyboardInterrupt
-
-    def get_frames(self, idx=None):
-        if idx is None:
-            idx = self.frame_idx
-        return tuple(p.get_frame(idx) for p in self.players)
-
-    def step(self, step_size=1):
-        self._frame_idx += step_size
-        self._frame_idx = self._frame_idx % self.frame_count
-
-    def time_step(self):
-        self.dt = time.time() - self.last_time if self.last_time is not None else 0.0
-        self.last_time = time.time()
-        return self.dt
-
-    def move(self, speed=1):
-        self._frame_idx += speed * self.dt * self.fps
-        self._frame_idx = self._frame_idx % self.frame_count
-
-    @property
-    def frame_idx(self):
-        return int(self._frame_idx)
-
 if __name__ == "__main__":
     import keybrd as kb
     import visual_servoing as v
 
     # ---- CONFIGURATION ----
     # Set these to any valid source: int (webcam), str (folder or file), or None for depth
-    COLOR_SOURCE = 0  # Webcam (use 0), or r"recording\color_pngs", or "video.mp4"
-    DEPTH_SOURCE = None  # r"recording\depth_pngs", "depth_video.mp4", or None
+    COLOR_SOURCE = r"recording\color_pngs"  # or "video.mp4", or None for webcam
+    DEPTH_SOURCE = r"recording\depth_pngs"
+    COLOR_SOURCE = 0
+    DEPTH_SOURCE = None
 
     color_vp = VideoPlayer(COLOR_SOURCE)
     depth_vp = VideoPlayer(DEPTH_SOURCE) if DEPTH_SOURCE else None
 
     oi = v.BlackObjectIsolator()
     ol = v.ObjectLocator(obj_isolator=oi)
+    controller = v.ArmController(obj_loc=ol)
     oi_pipeline = [
         ("raw_frame", lambda: None),
         ("value_thres", lambda: oi.hsv_thres(color_frame, drawing_frame=drawing_frame)),
@@ -183,7 +139,10 @@ if __name__ == "__main__":
         ("roll", lambda: ol.get_roll(color_frame, depth_frame=depth_frame, drawing_frame=drawing_frame)),
         ("pose", lambda: ol.get_pose(color_frame, depth_frame=depth_frame, drawing_frame=drawing_frame)),
     ]
-    pipeline = oi_pipeline + ol_pipeline
+    controller_pipeline = [
+        ("get_target", lambda: controller.get_target(color_frame, depth_frame=depth_frame, drawing_frame=drawing_frame)),
+    ]
+    pipeline = oi_pipeline + ol_pipeline + controller_pipeline
 
     re = kb.rising_edge
     pr = kb.is_pressed

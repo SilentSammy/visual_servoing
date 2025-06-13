@@ -143,9 +143,11 @@ class ObjectLocator:
     Y_STEP = 30
 
     def __init__(self,
-        obj_isolator=None
+        obj_isolator=None,
+        major_axis_ratio=2.2  # Ratio of the major axis to the minor axis for the object
     ):
         self.obj_isolator = obj_isolator or BlackObjectIsolator()
+        self.major_axis_ratio = 2.2
     
     def get_position(self, color_frame = None, mask = None, depth_frame=None, drawing_frame=None):
         """ Uses the mask from the ObjectIsolator to get x, y position of the object in the color frame;
@@ -158,7 +160,7 @@ class ObjectLocator:
             if drawing_frame is not None:
                 # Optionally clear or annotate the drawing_frame here if desired
                 pass
-            return None, None, None
+            return None
 
         cx = int(moments['m10'] / moments['m00'])
         cy = int(moments['m01'] / moments['m00'])
@@ -198,7 +200,7 @@ class ObjectLocator:
         return cx_norm, cy_norm, z
 
     def get_roll(self, color_frame=None, mask=None, depth_frame=None, drawing_frame=None):
-        pitch = yaw = roll = None
+        roll = None
 
         # We can safely assume that the mask is a single contour.
         mask =  mask if mask is not None else self.obj_isolator.get_mask(color_frame)
@@ -223,6 +225,15 @@ class ObjectLocator:
         
         return roll, line
 
+    def get_orientation(self, color_frame=None, mask=None, depth_frame=None, drawing_frame=None):
+        mask = mask if mask is not None else self.obj_isolator.get_mask(color_frame)
+        # Get the roll of the object
+        roll, line = self.get_roll(color_frame=color_frame, mask=mask, depth_frame=depth_frame, drawing_frame=drawing_frame)
+        if roll is None:
+            return None
+
+        pass
+
     def get_pose(self, color_frame, depth_frame=None, drawing_frame=None):
         mask = self.obj_isolator.get_mask(color_frame)
         
@@ -231,7 +242,7 @@ class ObjectLocator:
         roll, line = self.get_roll(color_frame, mask=mask, depth_frame=depth_frame, drawing_frame=drawing_frame)
 
         if cx_norm is None or cy_norm is None:
-            return None, None, None
+            return None
 
         if drawing_frame is not None:
             draw_line(drawing_frame, line)
@@ -376,6 +387,71 @@ class ArucoLocator:
             cv2.line(drawing_frame, line[0], line[1], (0, 255, 0), 2)
 
         return cx, cy, z, roll
+
+class ArmController:
+    def __init__(self,
+            obj_loc=None,
+            aruco_loc=None,
+            target_offset=(0.0, -0.15, 0.0),
+            target_local=True
+        ):
+        """
+        Args:
+            obj_loc: ObjectLocator instance or None.
+            target_offset: Tuple (dx, dy, dz) offset from detected object position.
+            target_local: If True, offset is applied in the object's local frame (rotated by roll).
+        """
+        self.obj_loc = obj_loc or ObjectLocator()
+        self.aruco_loc = aruco_loc or ArucoLocator()
+        self.target_offset = target_offset
+        self.target_local = target_local
+
+    def get_target(self, color_frame, depth_frame=None, drawing_frame=None):
+        object_pose = self.obj_loc.get_pose(color_frame, depth_frame=depth_frame, drawing_frame=drawing_frame)
+        if object_pose is None:
+            return None
+        
+        cx_norm, cy_norm, z, roll = object_pose
+
+        # Apply the target offset, rotating if target_local is True
+        dx, dy, dz = self.target_offset
+        if self.target_local and roll is not None:
+            # Rotate (dx, dy) by roll
+            dx_rot = dx * math.cos(roll) - dy * math.sin(roll)
+            dy_rot = dx * math.sin(roll) + dy * math.cos(roll)
+        else:
+            dx_rot, dy_rot = dx, dy
+
+        target_x = cx_norm + dx_rot
+        target_y = cy_norm + dy_rot
+        target_z = z + dz if z is not None else None
+
+        if drawing_frame is not None:
+            h, w = color_frame.shape[:2]
+            center = (int(round(target_x * w)), int(round(target_y * h)))
+            size = 20
+            color = (255, 0, 0)
+            thickness = 2
+
+            if self.target_local and roll is not None:
+                # Draw rotated crosshair
+                for angle_offset in [0, math.pi / 2]:
+                    angle = roll + angle_offset
+                    dx = int(size * math.cos(angle) / 2)
+                    dy = int(size * math.sin(angle) / 2)
+                    pt1 = (center[0] - dx, center[1] - dy)
+                    pt2 = (center[0] + dx, center[1] + dy)
+                    cv2.line(drawing_frame, pt1, pt2, color, thickness)
+            else:
+                # Draw standard crosshair
+                cv2.drawMarker(drawing_frame, center, color, markerType=cv2.MARKER_CROSS, markerSize=size, thickness=thickness)
+
+            # Write the target position in the top left corner
+            target_z_str = f"{target_z:.2f}" if target_z is not None else "None"
+            cv2.putText(drawing_frame, f"Target: ({target_x:.2f}, {target_y:.2f}, {target_z_str})", 
+                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            
+        return target_x, target_y, target_z, roll if self.target_local else 0
 
 def adaptive_thres(frame, drawing_frame=None,
     blur_kernel_size=(7, 7),  # Kernel size for GaussianBlur

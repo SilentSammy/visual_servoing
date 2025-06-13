@@ -144,7 +144,7 @@ class RobotMain(object):
 
 if __name__ == '__main__':
     RobotMain.pprint('xArm-Python-SDK Version:{}'.format(version.__version__))
-    arm = XArmAPI('192.168.1.204', baud_checkset=False)
+    arm = XArmAPI('192.168.1.207', baud_checkset=False)
     time.sleep(0.5)
     robot_main = RobotMain(arm)
     robot_main.run()
