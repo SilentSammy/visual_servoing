@@ -18,25 +18,28 @@ if __name__ == "__main__":
     import keybrd as kb
     import visual_servoing as v
     from xarm_control import XarmController
+    from kinect import get_frames
 
     try:
         vr = VideoRecorder(dir_path="./recording/videos", fps=30)
         oi = v.BlackObjectIsolator()
         ol = v.ObjectLocator(obj_isolator=oi)
         al = v.ArucoLocator()
-        controller = v.ArmController(obj_loc=ol)
+        controller = v.ArmController(obj_loc=ol, target_offset=(0, -0.175, 0))  # Adjust target offset as needed
 
         arm = XarmController('192.168.1.200')
-        lin_vel = 100  # translation speed
-        ang_vel = 30   # rotation speed (much slower)
+        lin_vel = 200  # translation speed
+        ang_vel = 15   # rotation speed (much slower)
 
         re = kb.rising_edge
         pr = kb.is_pressed
 
         while True:
             # Get current frame(s)
-            color_frame = get_color_frame()
-            depth_frame = get_depth_frame()
+            # color_frame = get_color_frame()
+            # depth_frame = get_depth_frame()
+            color_frame, depth_frame = get_frames()
+            # depth_frame = None
 
             if color_frame is None:
                 continue

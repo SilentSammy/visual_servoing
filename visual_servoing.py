@@ -277,7 +277,7 @@ class ObjectLocator:
     def get_orientation(self, color_frame=None, mask=None, depth_frame=None, drawing_frame=None):
         mask = mask if mask is not None else self.get_object_mask(color_frame=color_frame, depth_frame=depth_frame, drawing_frame=drawing_frame)
         # Get the roll of the object
-        roll, line = self.get_roll(color_frame=color_frame, mask=mask, depth_frame=depth_frame, drawing_frame=drawing_frame)
+        roll, major_ax = self.get_roll(color_frame=color_frame, mask=mask, depth_frame=depth_frame, drawing_frame=drawing_frame)
         if roll is None:
             return None, None, None
 
@@ -286,7 +286,6 @@ class ObjectLocator:
             return None, None, None
         
         contour = contours[0]
-        major_ax = get_contour_major_axis(contour)
         minor_ax = get_contour_minor_axis(contour)
         L_major = major_ax[-1]
         L_minor = minor_ax[-1]
@@ -325,22 +324,30 @@ class ObjectLocator:
         if pos is None:
             return None
         cx_norm, cy_norm, z = pos
-        roll, line = self.get_roll(color_frame, mask=mask, depth_frame=depth_frame, drawing_frame=drawing_frame)
-        # ...rest of your code...
+        roll, pitch, yaw = self.get_orientation(color_frame, mask=mask, depth_frame=depth_frame, drawing_frame=drawing_frame)
 
         if cx_norm is None or cy_norm is None:
             return None
 
         if drawing_frame is not None:
-            draw_line(drawing_frame, line)
-
-            # Write the pose information in the top left corner
-            cv2.putText(drawing_frame, f"x: {cx_norm:.2f}", (self.X_POS, self.Y_START), self.FONT, self.FONT_SCALE, self.FONT_COLOR, self.FONT_THICKNESS)
-            cv2.putText(drawing_frame, f"y: {cy_norm:.2f}", (self.X_POS, self.Y_START + self.Y_STEP), self.FONT, self.FONT_SCALE, self.FONT_COLOR, self.FONT_THICKNESS)
+            # Draw lines for major/minor axes are already handled in get_orientation
+            y_offset = self.Y_START
+            cv2.putText(drawing_frame, f"x: {cx_norm:.2f}", (self.X_POS, y_offset), self.FONT, self.FONT_SCALE, self.FONT_COLOR, self.FONT_THICKNESS)
+            y_offset += self.Y_STEP
+            cv2.putText(drawing_frame, f"y: {cy_norm:.2f}", (self.X_POS, y_offset), self.FONT, self.FONT_SCALE, self.FONT_COLOR, self.FONT_THICKNESS)
+            y_offset += self.Y_STEP
             if z is not None:
-                cv2.putText(drawing_frame, f"z: {float(z):.2f}", (self.X_POS, self.Y_START + 2 * self.Y_STEP), self.FONT, self.FONT_SCALE, self.FONT_COLOR, self.FONT_THICKNESS)
-            cv2.putText(drawing_frame, f"roll: {math.degrees(roll):.2f}", (self.X_POS, self.Y_START + 3 * self.Y_STEP), self.FONT, self.FONT_SCALE, self.FONT_COLOR, self.FONT_THICKNESS)
-        return cx_norm, cy_norm, z, roll
+                cv2.putText(drawing_frame, f"z: {float(z):.2f}", (self.X_POS, y_offset), self.FONT, self.FONT_SCALE, self.FONT_COLOR, self.FONT_THICKNESS)
+                y_offset += self.Y_STEP
+            if roll is not None:
+                cv2.putText(drawing_frame, f"roll: {math.degrees(roll):.2f}", (self.X_POS, y_offset), self.FONT, self.FONT_SCALE, self.FONT_COLOR, self.FONT_THICKNESS)
+                y_offset += self.Y_STEP
+            if pitch is not None:
+                cv2.putText(drawing_frame, f"pitch: {math.degrees(pitch):.2f}", (self.X_POS, y_offset), self.FONT, self.FONT_SCALE, self.FONT_COLOR, self.FONT_THICKNESS)
+                y_offset += self.Y_STEP
+            if yaw is not None:
+                cv2.putText(drawing_frame, f"yaw: {math.degrees(yaw):.2f}", (self.X_POS, y_offset), self.FONT, self.FONT_SCALE, self.FONT_COLOR, self.FONT_THICKNESS)
+        return cx_norm, cy_norm, z, roll, pitch, yaw
 
 class ArucoLocator:
     """Locates a single ArUco marker in a color+depth frame, returning (x, y, z, roll)."""
@@ -361,8 +368,19 @@ class ArucoLocator:
         self.aruco_dict = (dictionary or cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50))
         params = parameters or cv2.aruco.DetectorParameters()
         self.detector = cv2.aruco.ArucoDetector(self.aruco_dict, params)
+        self.K = np.array([
+            [897.43423,    0.0,      1048.95001],
+            [0.0,       907.40346,   765.7388],
+            [0.0,         0.0,         1.0]
+        ], dtype=np.float32)
+        self.D = np.array([0.103131, -0.051765, -0.002201, -0.001519, 0.0], dtype=np.float32)
 
-    def get_position(self, color_frame, depth_frame=None, drawing_frame=None):
+    def get_position(self, color_frame, depth_frame=None, drawing_frame=None, marker_length=0.05):
+        """
+        Returns (cx_norm, cy_norm, z) for the first detected marker.
+        Z is estimated using solvePnP and the calibrated camera intrinsics.
+        marker_length: marker side length in meters (or same units as you want z)
+        """
         # detect markers
         corners, ids, _ = self.detector.detectMarkers(color_frame)
         if ids is None or len(ids) == 0:
@@ -385,26 +403,30 @@ class ArucoLocator:
         cx_norm = cx / w
         cy_norm = cy / h
 
-        # estimate depth if provided
+        # Estimate Z using solvePnP
+        # Marker 3D points (Z=0 plane, origin at center)
+        hlen = marker_length / 2.0
+        obj_pts = np.array([
+            [-hlen,  hlen, 0],
+            [ hlen,  hlen, 0],
+            [ hlen, -hlen, 0],
+            [-hlen, -hlen, 0]
+        ], dtype=np.float32)
+        img_pts = pts.reshape(4, 2)
+
         z = None
-        if depth_frame is not None:
-            # assume depth_frame same size as color_frame
-            mask = np.zeros_like(depth_frame, dtype=np.uint8)
-            poly = pts.astype(np.int32)
-            cv2.fillConvexPoly(mask, poly, 255)
-            depths = depth_frame[mask > 0]
-            valid = depths > 0
-            if valid.any():
-                z = float(depths[valid].mean())
+        ok, rvec, tvec = cv2.solvePnP(obj_pts, img_pts, self.K, self.D, flags=cv2.SOLVEPNP_IPPE_SQUARE)
+        if ok:
+            z = float(tvec[2][0])  # Z in same units as marker_length
 
         # drawing
         if drawing_frame is not None:
             cv2.aruco.drawDetectedMarkers(drawing_frame, corners, ids)
             center = (int(round(cx)), int(round(cy)))
             cv2.drawMarker(drawing_frame, center,
-                           (0, 255, 0),
-                           markerType=cv2.MARKER_CROSS,
-                           markerSize=20, thickness=2)
+                        (0, 255, 0),
+                        markerType=cv2.MARKER_CROSS,
+                        markerSize=20, thickness=2)
             cv2.putText(drawing_frame,
                         f"x: {cx_norm:.2f}",
                         (self.X_POS, self.Y_START),
@@ -417,11 +439,11 @@ class ArucoLocator:
                         self.FONT_COLOR, self.FONT_THICKNESS)
             if z is not None:
                 cv2.putText(drawing_frame,
-                            f"z: {z:.2f}",
+                            f"z: {z:.3f}",
                             (self.X_POS, self.Y_START + 2 * self.Y_STEP),
                             self.FONT, self.FONT_SCALE,
                             self.FONT_COLOR, self.FONT_THICKNESS)
-
+        z *= 840
         return cx_norm, cy_norm, z
 
     def get_roll(self, color_frame, drawing_frame=None):
@@ -455,7 +477,98 @@ class ArucoLocator:
                         self.FONT, self.FONT_SCALE,
                         self.FONT_COLOR, self.FONT_THICKNESS)
 
-        return angle, (pt1, pt2)
+        return angle
+
+    def get_pitch_yaw(self, color_frame, marker_length=1.0, drawing_frame=None):
+        """
+        Estimate the marker's pitch and yaw by running solvePnP with
+        a guessed intrinsics matrix (f = image width, principal point = center).
+        marker_length is in arbitrary units (we use 1.0).
+        """
+        # 1) Detect the first marker
+        corners, ids, _ = self.detector.detectMarkers(color_frame)
+        if ids is None or len(ids) == 0:
+            return None, None
+
+        # 2) Normalize corner shape to (4,2)
+        pts = np.asarray(corners[0], dtype=np.float32)
+        if pts.ndim == 3:
+            pts = pts[0] if pts.shape[0]==1 else pts[:,0,:]
+        img_pts = pts.reshape(4,2)
+
+        # 3) Build object points on marker plane (Z=0), side = marker_length
+        h = marker_length/2.0
+        obj_pts = np.array([
+            [-h,  h, 0],
+            [ h,  h, 0],
+            [ h, -h, 0],
+            [-h, -h, 0]
+        ], dtype=np.float32)
+
+        # 4) Create a dummy K and zero distortion
+        h_img, w_img = color_frame.shape[:2]
+        f = w_img  # arbitrary focal length = image width
+        K = np.array([[f, 0, w_img/2],
+                      [0, f, h_img/2],
+                      [0, 0,      1]], dtype=np.float32)
+        D = np.zeros(5, dtype=np.float32)
+
+        # 5) Solve PnP
+        ok, rvec, tvec = cv2.solvePnP(
+            obj_pts, img_pts, K, D,
+            flags=cv2.SOLVEPNP_IPPE_SQUARE
+        )
+        if not ok:
+            return None, None
+
+        # 6) Convert rvec → rotation matrix R
+        R, _ = cv2.Rodrigues(rvec)
+
+        # 7) Extract ZYX Euler angles [roll, pitch, yaw]
+        sy = math.hypot(R[0,0], R[1,0])
+        # standard ZYX (yaw-pitch-roll) extraction
+        if sy > 1e-6:
+            pitch = math.atan2(-R[2,0], sy)
+            yaw   = math.atan2(R[1,0],  R[0,0])
+        else:
+            # gimbal lock
+            pitch = math.atan2(-R[2,0], sy)
+            yaw   = 0.0
+
+        # 8) (Optional) annotate
+        if drawing_frame is not None:
+            # draw marker outline
+            cv2.polylines(drawing_frame,
+                          [img_pts.astype(np.int32)], True,
+                          (0,255,0), 2)
+            cv2.putText(drawing_frame,
+                        f"pitch: {math.degrees(pitch):.1f}°",
+                        (self.X_POS, self.Y_START),
+                        self.FONT, self.FONT_SCALE,
+                        self.FONT_COLOR, self.FONT_THICKNESS)
+            cv2.putText(drawing_frame,
+                        f"yaw:   {math.degrees(yaw):.1f}°",
+                        (self.X_POS, self.Y_START + self.Y_STEP),
+                        self.FONT, self.FONT_SCALE,
+                        self.FONT_COLOR, self.FONT_THICKNESS)
+
+        return pitch, yaw
+    
+    def get_orientation(self, color_frame, depth_frame=None, drawing_frame=None):
+        """
+        Returns (roll, pitch, yaw) of the detected ArUco marker.
+        If depth_frame is provided, it will also return the z position.
+        """
+        roll = self.get_roll(color_frame)
+        pitch, yaw = self.get_pitch_yaw(color_frame)
+
+        if drawing_frame is not None:
+            # write the roll, pitch, yaw in the top left corner
+            cv2.putText(drawing_frame, f"roll: {math.degrees(roll):.2f}", (self.X_POS, self.Y_START), self.FONT, self.FONT_SCALE, self.FONT_COLOR, self.FONT_THICKNESS)
+            cv2.putText(drawing_frame, f"pitch: {math.degrees(pitch):.2f}", (self.X_POS, self.Y_START + self.Y_STEP), self.FONT, self.FONT_SCALE, self.FONT_COLOR, self.FONT_THICKNESS)
+            cv2.putText(drawing_frame, f"yaw: {math.degrees(yaw):.2f}", (self.X_POS, self.Y_START + 2 * self.Y_STEP), self.FONT, self.FONT_SCALE, self.FONT_COLOR, self.FONT_THICKNESS)
+
+        return roll, pitch, yaw
 
     def get_pose(self, color_frame, depth_frame=None, drawing_frame=None):
         """
@@ -464,14 +577,9 @@ class ArucoLocator:
         cx, cy, z = self.get_position(color_frame,
                                       depth_frame=depth_frame,
                                       drawing_frame=drawing_frame)
-        roll, line = self.get_roll(color_frame,
-                                   drawing_frame=drawing_frame)
+        roll, pitch, yaw = self.get_orientation(color_frame, drawing_frame=drawing_frame)
         if cx is None or cy is None:
             return None, None, None, None
-
-        # Optionally annotate the line (as ObjectLocator does)
-        if drawing_frame is not None and line is not None:
-            cv2.line(drawing_frame, line[0], line[1], (0, 255, 0), 2)
 
         return cx, cy, z, roll
 
@@ -492,17 +600,20 @@ class ArmController:
         self.aruco_loc = aruco_loc or ArucoLocator()
         self.target_offset = target_offset
         self.target_local = target_local
-        self.x_pid = PID(10.0, 0.1, 0.05, setpoint=0, output_limits=(-1, 1))
-        self.y_pid = PID(10.0, 0.1, 0.05, setpoint=0, output_limits=(-1, 1))
-        self.z_pid = PID(10.0, 0.1, 0.05, setpoint=0, output_limits=(-1, 1))
-        self.roll_pid = PID(10.0, 0.1, 0.05, setpoint=0, output_limits=(-1, 1))
+        self.x_pid = PID(5.0, 0.1, 0.05, setpoint=0, output_limits=(-1, 1))
+        self.y_pid = PID(5.0, 0.1, 0.05, setpoint=0, output_limits=(-1, 1))
+        self.z_pid = PID(5.0, 0, 0.1, setpoint=0, output_limits=(-1, 1))
+        self.roll_pid = PID(5.0, 0.1, 0.05, setpoint=0, output_limits=(-1, 1))
+        self.pit_pid = PID(5.0, 0.1, 0.05, setpoint=0, output_limits=(-1, 1))
+        self.yaw_pid = PID(5.0, 0.1, 0.05, setpoint=0, output_limits=(-1, 1))
 
     def get_target(self, color_frame, depth_frame=None, drawing_frame=None):
         object_pose = self.obj_loc.get_pose(color_frame, depth_frame=depth_frame, drawing_frame=drawing_frame)
         if object_pose is None:
             return None
         
-        cx_norm, cy_norm, z, roll = object_pose
+        # Unpack all pose values, but only use roll for offset
+        cx_norm, cy_norm, z, roll, pitch, yaw = object_pose
 
         # Apply the target offset, rotating if target_local is True
         dx, dy, dz = self.target_offset
@@ -542,7 +653,7 @@ class ArmController:
             cv2.putText(drawing_frame, f"Target: ({target_x:.2f}, {target_y:.2f}, {target_z_str})", 
                         (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             
-        return target_x, target_y, target_z, roll if self.target_local else 0
+        return target_x, target_y, target_z, roll, pitch, yaw if self.target_local else 0
 
     def compute_error(self, color_frame, depth_frame=None, drawing_frame=None):
         target_pose = self.get_target(color_frame, depth_frame=depth_frame)
@@ -551,7 +662,7 @@ class ArmController:
         if drawing_frame is not None:
             # Draw the target position
             if target_pose is not None:
-                cx, cy, cz, roll = target_pose
+                cx, cy, cz, roll, pitch, yaw = target_pose
                 if cx is not None and cy is not None:
                     h, w = color_frame.shape[:2]
                     center = (int(round(cx * w)), int(round(cy * h)))
@@ -575,14 +686,14 @@ class ArmController:
         if target_pose is None or current_pose is None:
             return None
         
-        target_x, target_y, target_z, target_roll = target_pose
+        target_x, target_y, target_z, target_roll, target_pitch, target_yaw = target_pose
         current_x, current_y, current_z, current_roll = current_pose
         # Compute the error as the difference between target and current positions
         error_x = target_x - current_x if target_x is not None and current_x is not None else None
         error_y = target_y - current_y if target_y is not None and current_y is not None else None
         error_z = target_z - current_z if target_z is not None and current_z is not None else None
         error_roll = target_roll - current_roll if target_roll is not None and current_roll is not None else None
-
+        error_z = error_z / 1000 if error_z is not None else None  # Scale Z error for better control
         if drawing_frame is not None:
             # Draw line between target and current positions
             if target_x is not None and target_y is not None and current_x is not None and current_y is not None:
@@ -616,7 +727,7 @@ class ArmController:
         control_roll = self.roll_pid(error_roll) if error_roll is not None else 0
 
         return control_x, control_y, control_z, control_roll
-        
+       
 def adaptive_thres(frame, drawing_frame=None,
     blur_kernel_size=(7, 7),  # Kernel size for GaussianBlur
     adaptive_method=cv2.ADAPTIVE_THRESH_GAUSSIAN_C,  # Adaptive thresholding method

@@ -161,10 +161,10 @@ if __name__ == "__main__":
 
     # ---- CONFIGURATION ----
     # Set these to any valid source: int (webcam), str (folder or file), or None for depth
-    COLOR_SOURCE = 0
-    DEPTH_SOURCE = None
     COLOR_SOURCE = r"recording\color_pngs"  # or "video.mp4", or None for webcam
     DEPTH_SOURCE = r"recording\depth_pngs"
+    COLOR_SOURCE = 0
+    DEPTH_SOURCE = None
 
     color_vp = VideoPlayer(COLOR_SOURCE)
     depth_vp = VideoPlayer(DEPTH_SOURCE) if DEPTH_SOURCE else None
@@ -185,13 +185,15 @@ if __name__ == "__main__":
         ("pose", lambda: ol.get_pose(color_frame, depth_frame=depth_frame, drawing_frame=drawing_frame)),
     ]
     aruco_pipeline = [
-        ("aruco", lambda: al.get_pose(color_frame, depth_frame=depth_frame, drawing_frame=drawing_frame)),
+        ("aruco_pos", lambda: al.get_position(color_frame, depth_frame=depth_frame, drawing_frame=drawing_frame)),
+        ("aruco_orientation", lambda: al.get_orientation(color_frame=color_frame, depth_frame=depth_frame, drawing_frame=drawing_frame)),
+        ("aruco_pose", lambda: al.get_pose(color_frame, depth_frame=depth_frame, drawing_frame=drawing_frame)),
     ]
     controller_pipeline = [
         ("get_target", lambda: controller.get_target(color_frame, depth_frame=depth_frame, drawing_frame=drawing_frame)),
         ("compute_error", lambda: controller.compute_error(color_frame, depth_frame=depth_frame, drawing_frame=drawing_frame)),
     ]
-    pipeline = raw + oi_pipeline + ol_pipeline + aruco_pipeline + controller_pipeline
+    pipeline = raw + aruco_pipeline + controller_pipeline
 
     re = kb.rising_edge
     pr = kb.is_pressed
